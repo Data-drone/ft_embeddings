@@ -1,7 +1,9 @@
 import os
 import argparse
 import mlflow
-#import logging
+import logging
+logging.getLogger("mlflow.system_metrics.metrics.gpu_monitor").setLevel(logging.ERROR)
+
 import json
 import packaging.version
 
@@ -26,7 +28,7 @@ from transformers.integrations import MLflowCallback
 from transformers.utils import flatten_dict, logging, ENV_VARS_TRUE_VALUES
 
 #logging.basicConfig(level=logging.DEBUG) 
-logging.set_verbosity_debug()
+#logging.set_verbosity_debug()
 logger = logging.get_logger(__name__)
 
         
@@ -89,12 +91,15 @@ if __name__ == '__main__':
     
     ## When running with torchrun we can get the world_size
     world_size = str(os.environ['WORLD_SIZE'])
+    
+    # this failse with transformers because the env check is done on library import
     run_id = os.getenv('MLFLOW_RUN_ID', None)
 
-    if run_id is None:
-        with mlflow.start_run() as run:
-            run_id = run.info.run_id
-            os.environ['MLFLOW_RUN_ID'] = run_id
+    # this does nothing
+    # if run_id is None and os.environ['RANK']==0:
+    #     with mlflow.start_run() as run:
+    #         run_id = run.info.run_id
+    #         os.environ['MLFLOW_RUN_ID'] = run_id
 
     output_dir = os.path.join(args.output_dir, f"{args.mlflow_run_name}-run-{str(run_id)}")
     os.makedirs(output_dir, exist_ok=True)
@@ -112,10 +117,12 @@ if __name__ == '__main__':
 
     # 3. Load a dataset to finetune on
     dataset = load_from_disk(args.data_dir, keep_in_memory=True)
-    train_dataset = dataset["train"].select(range(10_000))
+    train_dataset = dataset["train"].select(range(20_000))
     eval_dataset = dataset["dev"]
     test_dataset = dataset["test"]
-
+    
+    #### testing code
+    from torch.utils.data import DataLoader
     ### TODO Set Drop last to True and add DataLoader in rather than use dataset direct
 
     # 4. Define a loss function
@@ -130,19 +137,20 @@ if __name__ == '__main__':
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.per_device_batch_size,
         per_device_eval_batch_size=args.per_device_batch_size,
+        dataloader_num_workers=15,
         warmup_ratio=0.1,
-        fp16=True,  # Set to False if GPU can't handle FP16
-        bf16=False,  # Set to True if GPU supports BF16
+        fp16=False,  # Set to False if GPU can't handle FP16
+        bf16=True,  # Set to True if GPU supports BF16
         batch_sampler=BatchSamplers.NO_DUPLICATES,  # MultipleNegativesRankingLoss benefits from no duplicates
         # Optional tracking/debugging parameters:
-        eval_strategy="steps",
-        eval_steps=100,
+        eval_strategy="epoch",
+        #eval_steps=200,
         metric_for_best_model="eval_loss",
         greater_is_better=True,
-        load_best_model_at_end = True,
-        save_strategy="steps",
-        save_steps=100,
-        save_total_limit=2,
+        #load_best_model_at_end = True,
+        #save_strategy="steps",
+        #save_steps=100,
+        #save_total_limit=2,
         logging_steps=100,
         report_to=['tensorboard', 'mlflow']
         #run_name=f"mpnet-base-all-nli-triplet_{world_size}_gpus",  # Used in W&B if `wandb` is installed
@@ -178,3 +186,12 @@ if __name__ == '__main__':
         )
     
     trainer.train()
+    
+    import torch.distributed as dist
+    import atexit
+
+    def cleanup_distributed():
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+
+    atexit.register(cleanup_distributed)
